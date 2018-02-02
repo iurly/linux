@@ -1070,7 +1070,8 @@ static int max310x_startup(struct uart_port *port)
 	max310x_port_read(port, MAX310X_IRQSTS_REG);
 
 	/* Enable RX, TX, CTS change interrupts */
-	val = MAX310X_IRQ_RXEMPTY_BIT | MAX310X_IRQ_TXEMPTY_BIT;
+	val = /* MAX310X_IRQ_RXEMPTY_BIT | */ MAX310X_IRQ_TXEMPTY_BIT;
+	val |= MAX310X_IRQ_RXFIFO_BIT;
 	max310x_port_write(port, MAX310X_IRQEN_REG, val | MAX310X_IRQ_CTS_BIT);
 
 	return 0;
@@ -1297,6 +1298,9 @@ static int max310x_probe(struct device *dev, struct max310x_devtype *devtype,
 		regmap_update_bits(s->regmap, MAX310X_MODE1_REG + offs,
 				   MAX310X_MODE1_AUTOSLEEP_BIT,
 				   MAX310X_MODE1_AUTOSLEEP_BIT);
+		/* Set trigger level */
+		regmap_write(s->regmap, MAX310X_FIFOTRIGLVL_REG + offs, 
+			MAX310X_FIFOTRIGLVL_TX(120) |MAX310X_FIFOTRIGLVL_RX(64));
 	}
 
 	uartclk = max310x_set_ref_clk(s, freq, xtal, intosc);
