@@ -1069,9 +1069,19 @@ static int max310x_startup(struct uart_port *port)
 	/* Clear IRQ status register */
 	max310x_port_read(port, MAX310X_IRQSTS_REG);
 
+	/* Set RX timeout register */
+	max310x_port_write(port, MAX310X_RXTO_REG, 2);
+
+	/* Enable RX timeout as a LSR source interrupt */
+	max310x_port_write(port, MAX310X_LSR_IRQEN_REG,
+		MAX310X_LSR_RXTO_BIT);
+
 	/* Enable RX, TX, CTS change interrupts */
 	val = /* MAX310X_IRQ_RXEMPTY_BIT | */ MAX310X_IRQ_TXEMPTY_BIT;
 	val |= MAX310X_IRQ_RXFIFO_BIT;
+
+	/* Enable LSR interrupt bit to catch RX timeout */
+	val |= MAX310X_IRQ_LSR_BIT;
 	max310x_port_write(port, MAX310X_IRQEN_REG, val | MAX310X_IRQ_CTS_BIT);
 
 	return 0;
