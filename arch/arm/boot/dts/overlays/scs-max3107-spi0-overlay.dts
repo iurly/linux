@@ -80,7 +80,7 @@
                 clock-names = "xtal";
                 clocks = <&max0_osc>;
 */
-                spi-max-frequency = <10000000>;
+                spi-max-frequency = <32000000>;
                 interrupt-parent = <&gpio>;
                 interrupts = <27 0x2>; /* IRQ_TYPE_EDGE_FALLING = 0x2 */
                 gpio-controller;
