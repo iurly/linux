@@ -1103,6 +1103,7 @@ static int mcp251x_can_probe(struct spi_device *spi)
 
 	/* If requested, allocate DMA buffers */
 	if (mcp251x_enable_dma) {
+    dev_err(&spi->dev, "trying to allocate dma buffers");
 		spi->dev.coherent_dma_mask = ~0;
 
 		/*
@@ -1126,6 +1127,7 @@ static int mcp251x_can_probe(struct spi_device *spi)
 
 	/* Allocate non-DMA buffers */
 	if (!mcp251x_enable_dma) {
+    dev_err(&spi->dev, "trying to allocate NON dma buffers");
 		priv->spi_tx_buf = devm_kzalloc(&spi->dev, SPI_TRANSFER_BUF_LEN,
 						GFP_KERNEL);
 		if (!priv->spi_tx_buf) {
