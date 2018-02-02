@@ -13,6 +13,13 @@
  *  (at your option) any later version.
  */
 
+/* Changed by Gerlando Falauto, July 2017.
+ * - Added support for internal oscillator (though known to be unreliable)
+ * - Changed reference baudrate (2000000 instead of 115200)
+ * TODO's and known issues:
+ * - Clock should be set everytime we change baudrate
+ * - We should find a way to use DMA!!!
+ */
 #include <linux/bitops.h>
 #include <linux/clk.h>
 #include <linux/delay.h>
@@ -227,6 +234,7 @@
 #define MAX310X_BRGCFG_4XMODE_BIT	(1 << 5) /* Quadruple baud rate */
 
 /* Clock source register bits */
+#define MAX310X_CLKSRC_INTOSC_BIT (1 << 0) /* Internal oscillator */
 #define MAX310X_CLKSRC_CRYST_BIT	(1 << 1) /* Crystal osc enable */
 #define MAX310X_CLKSRC_PLL_BIT		(1 << 2) /* PLL enable */
 #define MAX310X_CLKSRC_PLLBYP_BIT	(1 << 3) /* PLL bypass */
@@ -256,6 +264,7 @@ struct max310x_devtype {
 	int	nr;
 	int	(*detect)(struct device *);
 	void	(*power)(struct uart_port *, int);
+	long	intosc; /* Internal oscillator frequency, if any */
 };
 
 struct max310x_one {
@@ -407,6 +416,7 @@ static const struct max310x_devtype max3107_devtype = {
 	.nr	= 1,
 	.detect	= max3107_detect,
 	.power	= max310x_power,
+	.intosc = 614400,
 };
 
 static const struct max310x_devtype max3108_devtype = {
@@ -414,6 +424,7 @@ static const struct max310x_devtype max3108_devtype = {
 	.nr	= 1,
 	.detect	= max3108_detect,
 	.power	= max310x_power,
+	.intosc = 0,
 };
 
 static const struct max310x_devtype max3109_devtype = {
@@ -421,6 +432,7 @@ static const struct max310x_devtype max3109_devtype = {
 	.nr	= 2,
 	.detect	= max3109_detect,
 	.power	= max310x_power,
+	.intosc = 0,
 };
 
 static const struct max310x_devtype max14830_devtype = {
@@ -428,6 +440,7 @@ static const struct max310x_devtype max14830_devtype = {
 	.nr	= 4,
 	.detect	= max14830_detect,
 	.power	= max14830_power,
+	.intosc = 0, /* TODO: MAX14830 probably has it but this needs to be tested */
 };
 
 static bool max310x_reg_writeable(struct device *dev, unsigned int reg)
@@ -506,6 +519,7 @@ static int max310x_set_baud(struct uart_port *port, int baud)
 		}
 	}
 
+  printk("Clock = %d, Baud=%d, Setting mode = %d, div = %d\n", clk, baud, mode, div);
 	max310x_port_write(port, MAX310X_BRGDIVMSB_REG, (div / 16) >> 8);
 	max310x_port_write(port, MAX310X_BRGDIVLSB_REG, div / 16);
 	max310x_port_write(port, MAX310X_BRGCFG_REG, (div % 16) | mode);
@@ -516,7 +530,7 @@ static int max310x_set_baud(struct uart_port *port, int baud)
 static int max310x_update_best_err(unsigned long f, long *besterr)
 {
 	/* Use baudrate 115200 for calculate error */
-	long err = f % (115200 * 16);
+	long err = f % (2000000L * 4L);
 
 	if ((*besterr < 0) || (*besterr > err)) {
 		*besterr = err;
@@ -527,7 +541,7 @@ static int max310x_update_best_err(unsigned long f, long *besterr)
 }
 
 static int max310x_set_ref_clk(struct max310x_port *s, unsigned long freq,
-			       bool xtal)
+			       bool xtal, bool intosc)
 {
 	unsigned int div, clksrc, pllcfg = 0;
 	long besterr = -1;
@@ -571,8 +585,13 @@ static int max310x_set_ref_clk(struct max310x_port *s, unsigned long freq,
 	}
 
 	/* Configure clock source */
-	clksrc = xtal ? MAX310X_CLKSRC_CRYST_BIT : MAX310X_CLKSRC_EXTCLK_BIT;
-
+	if (intosc)
+		clksrc = MAX310X_CLKSRC_INTOSC_BIT; 
+	else if (xtal)
+		clksrc = MAX310X_CLKSRC_CRYST_BIT;
+	else
+		clksrc = MAX310X_CLKSRC_EXTCLK_BIT;
+  
 	/* Configure PLL */
 	if (pllcfg) {
 		clksrc |= MAX310X_CLKSRC_PLL_BIT;
@@ -586,6 +605,7 @@ static int max310x_set_ref_clk(struct max310x_port *s, unsigned long freq,
 	if (pllcfg && xtal)
 		msleep(10);
 
+  printk("Chosen frequency = %lu\n", bestfreq);
 	return (int)bestfreq;
 }
 
@@ -799,6 +819,7 @@ static void max310x_set_termios(struct uart_port *port,
 	unsigned int lcr, flow = 0;
 	int baud;
 
+  printk("SETTING TERMIOS\n");
 	/* Mask termios capabilities we don't support */
 	termios->c_cflag &= ~CMSPAR;
 
@@ -870,6 +891,7 @@ static void max310x_set_termios(struct uart_port *port,
 				  port->uartclk / 16 / 0xffff,
 				  port->uartclk / 4);
 
+  printk("Requested baudrate was %d, min=%d, max=%d, returned %d\n", tty_termios_baud_rate(termios), port->uartclk / 16 / 0xffff,  port->uartclk / 4, baud);
 	/* Setup baudrate generator */
 	baud = max310x_set_baud(port, baud);
 
@@ -1085,6 +1107,7 @@ static int max310x_probe(struct device *dev, struct max310x_devtype *devtype,
 	struct clk *clk_osc, *clk_xtal;
 	struct max310x_port *s;
 	bool xtal = false;
+	bool intosc = false;
 
 	if (IS_ERR(regmap))
 		return PTR_ERR(regmap);
@@ -1111,22 +1134,30 @@ static int max310x_probe(struct device *dev, struct max310x_devtype *devtype,
 	} else if (PTR_ERR(clk_osc) == -EPROBE_DEFER ||
 		   PTR_ERR(clk_xtal) == -EPROBE_DEFER) {
 		return -EPROBE_DEFER;
+	} else if (devtype->intosc) {
+		dev_err(dev, "Cannot get clock, falling back to (unsupported) internal oscillator!\n");
+		s->clk = NULL;
+		intosc = true;
 	} else {
 		dev_err(dev, "Cannot get clock\n");
 		return -EINVAL;
 	}
 
-	ret = clk_prepare_enable(s->clk);
-	if (ret)
+	if (intosc)
+	{
+		freq = devtype->intosc;
+	} else {
+		ret = clk_prepare_enable(s->clk);
+		if (ret)
 		return ret;
 
-	freq = clk_get_rate(s->clk);
-	/* Check frequency limits */
-	if (freq < fmin || freq > fmax) {
-		ret = -ERANGE;
-		goto out_clk;
+		freq = clk_get_rate(s->clk);
+		/* Check frequency limits */
+		if (freq < fmin || freq > fmax) {
+			ret = -ERANGE;
+			goto out_clk;
+		}
 	}
-
 	s->regmap = regmap;
 	s->devtype = devtype;
 	dev_set_drvdata(dev, s);
@@ -1156,7 +1187,7 @@ static int max310x_probe(struct device *dev, struct max310x_devtype *devtype,
 				   MAX310X_MODE1_AUTOSLEEP_BIT);
 	}
 
-	uartclk = max310x_set_ref_clk(s, freq, xtal);
+	uartclk = max310x_set_ref_clk(s, freq, xtal, intosc);
 	dev_dbg(dev, "Reference clock set to %i Hz\n", uartclk);
 
 	/* Register UART driver */
