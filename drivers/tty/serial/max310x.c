@@ -16,11 +16,8 @@
 /* Changed by Gerlando Falauto, July 2017.
  * - Added support for internal oscillator (though known to be unreliable)
  * - Changed reference baudrate (2000000 instead of 115200)
- * - Drafted burst readings
- *
  * TODO's and known issues:
  * - Clock should be set everytime we change baudrate
- * - Burst readings do not handle errors reported by the chip (framing errors, etc)
  * - We should find a way to use DMA!!!
  */
 #include <linux/bitops.h>
@@ -285,7 +282,6 @@ struct max310x_port {
 #ifdef CONFIG_GPIOLIB
 	struct gpio_chip	gpio;
 #endif
-	unsigned char			buf[MAX310X_FIFO_SIZE];
 	struct max310x_one	p[0];
 };
 
@@ -304,16 +300,6 @@ static void max310x_port_write(struct uart_port *port, u8 reg, u8 val)
 	struct max310x_port *s = dev_get_drvdata(port->dev);
 
 	regmap_write(s->regmap, port->iobase + reg, val);
-}
-
-static void max310x_fifo_read(struct uart_port *port, unsigned int rxlen)
-{
-	struct max310x_port *s = dev_get_drvdata(port->dev);
-	u8 addr = port->iobase + MAX310X_RHR_REG;
-
-	regcache_cache_bypass(s->regmap, true);
-	regmap_raw_read(s->regmap, addr, s->buf, rxlen);
-	regcache_cache_bypass(s->regmap, false);
 }
 
 static void max310x_port_update(struct uart_port *port, u8 reg, u8 mask, u8 val)
@@ -625,9 +611,7 @@ static int max310x_set_ref_clk(struct max310x_port *s, unsigned long freq,
 
 static void max310x_handle_rx(struct uart_port *port, unsigned int rxlen)
 {
-  struct max310x_port *s = dev_get_drvdata(port->dev);
 	unsigned int sts, ch, flag;
-	unsigned int bytes_read, i;
 
 	if (unlikely(rxlen >= port->fifosize)) {
 		dev_warn_ratelimited(port->dev,
@@ -638,14 +622,8 @@ static void max310x_handle_rx(struct uart_port *port, unsigned int rxlen)
 		rxlen = port->fifosize;
 	}
 
-	while (rxlen) {
-		//ch = max310x_port_read(port, MAX310X_RHR_REG);
-			/* Read in burst, and screw it */
-      max310x_fifo_read(port, rxlen);
-			bytes_read = rxlen;
-
-
-  /* XXX we're reading LSR only once... */
+	while (rxlen--) {
+		ch = max310x_port_read(port, MAX310X_RHR_REG);
 		sts = max310x_port_read(port, MAX310X_LSR_IRQSTS_REG);
 
 		sts &= MAX310X_LSR_RXPAR_BIT | MAX310X_LSR_FRERR_BIT |
@@ -677,17 +655,13 @@ static void max310x_handle_rx(struct uart_port *port, unsigned int rxlen)
 				flag = TTY_OVERRUN;
 		}
 
-		for (i = 0; i < bytes_read; ++i) {
-			ch = s->buf[i];
-			if (uart_handle_sysrq_char(port, ch))
-				continue;
+		if (uart_handle_sysrq_char(port, ch))
+			continue;
 
-			if (sts & port->ignore_status_mask)
-				continue;
+		if (sts & port->ignore_status_mask)
+			continue;
 
-      uart_insert_char(port, sts, MAX310X_LSR_RXOVR_BIT, ch, flag);
-		}
-		rxlen -= bytes_read;
+		uart_insert_char(port, sts, MAX310X_LSR_RXOVR_BIT, ch, flag);
 	}
 
 	tty_flip_buffer_push(&port->state->port);
