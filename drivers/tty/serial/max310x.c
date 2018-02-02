@@ -24,6 +24,7 @@
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/device.h>
+#include <linux/dma-mapping.h>
 #include <linux/gpio.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -260,6 +261,11 @@
 #define MAX14830_BRGCFG_CLKDIS_BIT	(1 << 6) /* Clock Disable */
 #define MAX14830_REV_ID			(0xb0)
 
+static int max310x_enable_dma; /* Enable SPI DMA. Default: 0 (Off) */
+module_param(max310x_enable_dma, int, S_IRUGO);
+MODULE_PARM_DESC(max310x_enable_dma, "Enable SPI DMA. Default: 0 (Off)");
+
+
 struct max310x_devtype {
 	char	name[9];
 	int	nr;
@@ -278,6 +284,16 @@ struct max310x_port {
 	struct uart_driver	uart;
 	struct max310x_devtype	*devtype;
 	struct regmap		*regmap;
+
+	u8 *spi_tx_buf1;
+	u8 *spi_rx_buf1;
+	u8 *spi_tx_buf2;
+	u8 *spi_rx_buf2;
+	dma_addr_t spi_tx_dma1;
+	dma_addr_t spi_rx_dma1;
+	dma_addr_t spi_tx_dma2;
+	dma_addr_t spi_rx_dma2;
+
 	struct mutex		mutex;
 	struct clk		*clk;
 #ifdef CONFIG_GPIOLIB
@@ -627,7 +643,11 @@ static void max310x_batch_write(struct uart_port *port, u8 *txbuf, unsigned int 
 
 static void max310x_batch_read(struct uart_port *port, u8 *rxbuf, unsigned int len)
 {
+	struct max310x_port *s = dev_get_drvdata(port->dev);
+	struct spi_device *spi = to_spi_device(port->dev);
 	u8 header[] = { port->iobase + MAX310X_RHR_REG };
+	struct spi_message m;
+	int ret;
 	struct spi_transfer xfer[] = {
 		{
 			.tx_buf = &header,
@@ -637,7 +657,32 @@ static void max310x_batch_read(struct uart_port *port, u8 *rxbuf, unsigned int l
 			.len = len,
 		}
 	};
-	spi_sync_transfer(to_spi_device(port->dev), xfer, ARRAY_SIZE(xfer));
+	if (max310x_enable_dma) {
+		dev_warn_ratelimited(port->dev, "Reading FIFO in DMA mode, len = %d\n", len);
+		memcpy(s->spi_tx_buf1, &header, sizeof(header));
+		xfer[0].tx_buf = s->spi_tx_buf1,
+		xfer[0].tx_dma = s->spi_tx_dma1;
+		/* This is probably not needed */
+		xfer[0].rx_buf = s->spi_rx_buf1,
+		xfer[0].rx_dma = s->spi_rx_dma1;
+
+		/* This is probably not needed either */
+		xfer[1].tx_buf = s->spi_tx_buf2,
+		xfer[1].tx_dma = s->spi_tx_dma2;
+
+		xfer[1].rx_buf = s->spi_rx_buf2;
+		xfer[1].rx_dma = s->spi_rx_dma2;
+		m.is_dma_mapped = 1;
+	}
+	spi_message_init(&m);
+	spi_message_add_tail(&xfer[0], &m);
+	spi_message_add_tail(&xfer[1], &m);
+	ret = spi_sync(spi, &m);
+	if (ret)
+		dev_err(port->dev, "spi transfer failed: ret = %d\n", ret);
+	if (max310x_enable_dma) {
+		memcpy(rxbuf, xfer[1].rx_buf, len);
+	}
 }
 
 static void max310x_handle_rx(struct uart_port *port, unsigned int rxlen)
@@ -682,6 +727,7 @@ static void max310x_handle_rx(struct uart_port *port, unsigned int rxlen)
 		}
 
 		while (rxlen--) {
+			dev_warn_ratelimited(port->dev, "Reading individual bytes\n");
 			ch = max310x_port_read(port, MAX310X_RHR_REG);
 			sts = max310x_port_read(port, MAX310X_LSR_IRQSTS_REG);
 
@@ -1285,6 +1331,34 @@ static int max310x_probe(struct device *dev, struct max310x_devtype *devtype,
 		goto out_uart;
 #endif
 
+	/* If requested, allocate DMA buffers */
+	if (max310x_enable_dma) {
+		struct spi_device *spi = to_spi_device(dev);
+		dev_err(&spi->dev, "trying to allocate dma buffers");
+		spi->dev.coherent_dma_mask = ~0;
+
+		/*
+		* Minimum coherent DMA allocation is PAGE_SIZE, so allocate
+		* that much and share it between Tx and Rx DMA buffers.
+		*/
+		s->spi_tx_buf1 = dmam_alloc_coherent(&spi->dev,
+			PAGE_SIZE,
+			&s->spi_tx_dma1,
+			GFP_DMA);
+
+		if (s->spi_tx_buf1) {
+			s->spi_rx_buf1 = (s->spi_tx_buf1 +            (PAGE_SIZE / 4));
+			s->spi_rx_dma1 = (dma_addr_t)(s->spi_tx_dma1 + PAGE_SIZE / 4);
+			s->spi_tx_buf2 = (s->spi_tx_buf1 +            (PAGE_SIZE / 2));
+			s->spi_tx_dma2 = (dma_addr_t)(s->spi_tx_dma1 + PAGE_SIZE / 2);
+			s->spi_rx_buf2 = (s->spi_tx_buf2 +            (PAGE_SIZE / 4));
+			s->spi_rx_dma2 = (dma_addr_t)(s->spi_tx_dma2 + PAGE_SIZE / 4);
+		} else {
+			/* Fall back to non-DMA */
+			max310x_enable_dma = 0;
+			dev_err(&spi->dev, "trying to allocate dma buffers");
+		}
+	}
 	mutex_init(&s->mutex);
 
 	for (i = 0; i < devtype->nr; i++) {

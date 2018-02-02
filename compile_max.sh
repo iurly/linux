@@ -25,7 +25,7 @@ set -e
 sudo rmmod max310x.ko || true
 sudo rmmod regmap-spi.ko || true
 sudo insmod -f /tmp/regmap-spi.ko
-sudo insmod  -f /tmp/max310x.ko
+sudo insmod -f /tmp/max310x.ko max310x_enable_dma=1
 
 echo "Removing old device tree if present"
 # Remove (old) device tree overlay, if present
