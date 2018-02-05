@@ -59,6 +59,13 @@ stty -F /dev/ttyMAX0 speed 2000000
 # Output some string
 echo 0123456789 > /dev/ttyMAX0
 
+# Activate LED3/BCM21 of the expansion board which we might use for debugging and tracing with logic analyzer using PIN 40 of the header
+echo "Activating LED3 (blue)"
+echo 21 > /sys/class/gpio/export 2>/dev/null || true
+sleep .5
+echo out > /sys/class/gpio/gpio21/direction
+echo 1 > /sys/class/gpio/gpio21/value
+
 echo "max3107 initialized successfully"
 __EOF__
 
