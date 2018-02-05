@@ -581,13 +581,23 @@ static int bcm2835_spi_transfer_one(struct spi_master *master,
 
 	/* for short requests run polling*/
 	if (xfer_time_us <= BCM2835_SPI_POLLING_LIMIT_US)
+  {
+    dev_warn_ratelimited(&spi->dev, "Using polling mode for %d bytes in %d us\n",
+      tfr->len, xfer_time_us);
 		return bcm2835_spi_transfer_one_poll(master, spi, tfr,
 						     cs, xfer_time_us);
+  }
 
 	/* run in dma mode if conditions are right */
 	if (master->can_dma && bcm2835_spi_can_dma(master, spi, tfr))
+  {
+    dev_warn_ratelimited(&spi->dev, "Attempting DMA for %d bytes in %d us\n",
+      tfr->len, xfer_time_us);
 		return bcm2835_spi_transfer_one_dma(master, spi, tfr, cs);
+  }
 
+  dev_warn_ratelimited(&spi->dev, "Using interrupt for %d bytes in %d us\n",
+    tfr->len, xfer_time_us);
 	/* run in interrupt-mode */
 	return bcm2835_spi_transfer_one_irq(master, spi, tfr, cs);
 }
